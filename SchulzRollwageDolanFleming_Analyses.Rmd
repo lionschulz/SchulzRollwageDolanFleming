@@ -1,0 +1,1863 @@
+---
+title: "Full Analyses: Schulz, Rollwage, Dolan, & Fleming: Dogmatism Manifests in Lowered Information Seeking Under Uncertainty"
+output: 
+---
+
+# Code purpose and structure
+
+The following code underlies results from Schulz, Rollwage, Dolan & Fleming, "Dogmatism Manifests in Lowered Information Search Under Uncertainty".
+
+The code is structured so that it presents the analyses and results in the order of the manuscript. We first present the main text's results, and then results from the Methods/SI.
+
+
+# Set-Up
+
+We begin by specifying the necessary libraries and loading the data files.
+
+
+## Libraries
+
+We load the libraries:
+
+```{r, warning = FALSEs}
+library(plyr)
+library(stringr)
+library(ggplot2)
+library(mediation)
+library(gridExtra)
+library(R.matlab)
+library(psych)
+library(nFactors)
+library(patchwork)
+library(afex)
+library(reshape2)
+library(GPArotation)
+library(blme)
+
+
+## Options to speed up rstan
+library(rstan)
+options(mc.cores = parallel::detectCores())   # uses all corse
+rstan_options(auto_write = TRUE)
+
+## Options for printing
+dpiWanted <- 300 # defines the dpi for outputting the plots
+dpiScaling <- 95 # this is necessary to scale the output of the with the dpi
+
+
+# Functions
+'%!in%' <- function(x,y)!('%in%'(x,y))
+```
+
+## Settings
+
+Sampling settings for the mediation analysis and stan.
+
+```{r}
+set.seed(1402)
+set_mediationsims <- 200000
+set_staniter <- 10000
+set_stanwarmup <- 5000
+```
+
+
+
+## Data
+
+We first specify the data location:
+
+```{r}
+LocationData <- "Data/"
+```
+
+We load all necessary data, first from study 1.
+
+```{r}
+Df_S1Task <- read.csv(paste(LocationData, "S1_TaskData.csv", sep = ""), header = TRUE) # Task Data
+Df_S1Quest <- read.csv(paste(LocationData, "S1_QuestData.csv", sep = ""), header = TRUE) # Questionnaire data in format for matrix
+Df_S1Demog <- read.csv(paste(LocationData, "S1_DemogData.csv", sep = ""), header = TRUE) # Demographical Data
+Df_S1Add <- read.csv(paste(LocationData, "S1_Add.csv", sep = ""), header = TRUE) # File that contains dot difference, maximum points and performance on stronger stimulus
+```
+
+Then, we load the data from the replication sample, study 2.
+
+```{r}
+Df_S2Task <- read.csv(paste(LocationData, "S2_TaskData.csv", sep = ""), header = TRUE)
+Df_S2Quest <- read.csv(paste(LocationData, "S2_QuestData.csv", sep = ""), header = TRUE)
+Df_S2Demog <- read.csv(paste(LocationData, "S2_DemogData.csv", sep = ""), header = TRUE)
+Df_S2Add <- read.csv(paste(LocationData, "S2_Add.csv", sep = ""), header = TRUE)
+```
+
+Finally, we additionally load questionnaire data from Rollwage, Dolan, & Fleming, "Metacognitive Features of Those Holding Radical Believes". This is used in the factor analysis.
+
+```{r}
+Rollw18_matlab <- readMat(paste(LocationData, "Rollwage18_QuestData.mat", sep = ""), header = TRUE)
+# This is from a MatLab Analysis, we preprocess this for R
+Df_Rollw18Quest <- Rollw18_matlab$Questionnaire.extract
+colnames(Df_Rollw18Quest) <- matrix(0,1,length(Rollw18_matlab$Items.labels))
+Df_Rollw18Quest <- as.data.frame(Df_Rollw18Quest)
+```
+
+We do recode variables.
+
+```{r}
+# We center the education variable
+Df_S1Demog$Education <- Df_S1Demog$Education - 3.5
+Df_S2Demog$Education <- Df_S2Demog$Education - 3.5
+
+# We relabel the confidence variable
+Df_S1Task[which(Df_S1Task$Confidence1st == 67),]$Confidence1st <- -1
+Df_S1Task[which(Df_S1Task$Confidence1st == 83),]$Confidence1st <- 0
+Df_S1Task[which(Df_S1Task$Confidence1st == 100),]$Confidence1st <- 1
+Df_S2Task[which(Df_S2Task$Confidence1st == 67),]$Confidence1st <- -1
+Df_S2Task[which(Df_S2Task$Confidence1st == 83),]$Confidence1st <- 0
+Df_S2Task[which(Df_S2Task$Confidence1st == 100),]$Confidence1st <- 1
+```
+
+
+# Analysis: Main Text
+
+## General Preprocessing and sample overview.
+
+First, we get an overview of the two samples.
+
+```{r}
+# We get the IDs for the two studies
+IDs_S1 <- Df_S1Quest$CompCode
+IDs_S2 <- Df_S2Quest$CompCode
+
+# we check their length
+N_S1 <- length(IDs_S1)
+N_S2 <- length(IDs_S2)
+print(N_S1)
+print(N_S2)
+
+# We get a vector with the participant's ids - this will be especially necessary later when we merge questionnaire data with the behaviour
+IDs_Full <- c(as.character(IDs_S1), as.character(IDs_S2))
+# We set up a vector that will later distinguish the two studies in a data frame
+StudyVector <- c(rep("Study1",N_S1), rep("Study2", N_S2))
+```
+
+
+## Factor Analysis
+
+We first conduct the factor analysis.
+
+### Data Pre-Processing
+
+We initially have to prepare our questionnaire files for the factor analysis. This involves stripping it of unnecessary columns, and bringing together all the questionnaire datafiles. Because the factor analysis package requires us to use matrices, we convert it.
+
+```{r}
+# We first strip the completion code column from the new dataframes
+Df_S1Quest <- Df_S1Quest[,2:length(Df_S1Quest)]
+Df_S2Quest <- Df_S2Quest[,2:length(Df_S2Quest)]
+
+# We combine the two files
+Df_ForFA <- rbind(Df_S1Quest, Df_S2Quest)
+Df_ForFA <- data.matrix(Df_ForFA, rownames.force = NA) # and prepare it as a matrix
+
+# We also specify the columnnames in the dataframe from Rollwage et al., 2018
+colnames(Df_Rollw18Quest) <- colnames(Df_ForFA)
+
+# We combine all the datafiles
+Df_ForFA <- rbind(Df_ForFA, Df_Rollw18Quest)
+```
+
+We check the dimensions of this new datafile.
+
+```{r}
+dim(Df_ForFA)
+```
+
+### Factor Analysis
+
+We first conduct the Cattell-Nelson-Gorsuch test to get the number of factors.
+
+```{r}
+CNG <- nCng(cor(Df_ForFA), cor=TRUE, model="factors", details=TRUE) # run the test
+fa_Nfactors <- CNG $nFactors # save the number of factors
+fa_Nfactors # return it
+```
+
+We next run the actual factor analysis.
+
+```{r}
+fa_results <- fa(Df_ForFA, nfactors = fa_Nfactors,rotate = "oblimin", fm="ml") # run
+fa_loadings <- fa_results$loadings # extract factor loadings
+Df_loadings <- data.frame(PolOrientLoad = fa_loadings[,1], DogmaLoad = fa_loadings[,2], PBSLoad = fa_loadings[,3]) # and save this into a dataframe
+```
+
+We check how much variance the factor analysis explains.
+
+```{r}
+fa_results$Vaccounted
+```
+
+
+### Plotting the Factor Analysis
+
+We plot the factor analysis:
+
+```{r}
+# We define the names of the questionnaires here
+Questionnaires <- c(rep("Self report",3), rep("Voting",3), rep("SECS",12), rep("RWA",12), rep("LWA",8), rep("Political Issues",9), rep("Belief Superiority",9), rep("Dog",22))
+# We define the colours to match those in Rollwage et al., 2019 
+FA_color <- c("#D55E00", "#CC79A7", "#0072B2","#F0E442","#56B4E9","#009E73","#999999","#E69F00")
+
+# For plotting we add the questionnaire names as a variable into the dataframe
+Df_loadings$Question <- factor(rownames(Df_loadings), levels = rownames(Df_loadings))
+Df_loadings$Questionnaires <- Questionnaires
+
+# We plot the first factor: Political Orientation
+pl_FAPolOrient <- ggplot(Df_loadings, aes(x = Question, y = PolOrientLoad, fill=Questionnaires)) + 
+  geom_bar(stat = "identity") + 
+  scale_fill_manual(guide = FALSE, values= FA_color, name="Questionnaires", breaks=c("Self report", "Voting", "SECS", "RWA", "LWA", "Political Issues", "Belief Superiority", "Dog"),labels=c("Political Orientation", "Voting", "SECS", "RWA", "LWA", "Political Issues", "Belief Superiority", "Dogmatism"))+
+  labs(y = "Loadings") +  theme_classic(base_size = 26) +
+  theme(axis.ticks = element_blank() ,axis.text.x = element_blank(),axis.line = element_blank(),legend.title=element_blank(), axis.title.x = element_blank()) +
+  expand_limits(y=c(-.9,.9)) +
+  scale_x_discrete(labels = FALSE) 
+pl_FAPolOrient
+
+# We plot the second factor: Dogmatism
+pl_FADogmatism <- ggplot(Df_loadings, aes(x = Question, y = DogmaLoad, fill=Questionnaires)) +
+  geom_bar(stat = "identity") + 
+  scale_fill_manual(guide = FALSE, values= FA_color, name="Questionnaires", breaks=c("Self report", "Voting", "SECS", "RWA", "LWA", "Political Issues", "Belief Superiority", "Dog"),labels=c("Political Orientation", "Voting", "SECS", "RWA", "LWA", "Political Issues", "Belief Superiority", "Dogmatism"))+
+  labs(y = "Loadings") +  theme_classic(base_size = 26) +
+  theme(axis.ticks = element_blank() ,axis.text.x = element_blank(),axis.line = element_blank(),legend.title=element_blank(), axis.title.x = element_blank()) +
+  expand_limits(y=c(-.9,.9))
+pl_FADogmatism
+
+pl_FAPBS <- ggplot(Df_loadings, aes(x = Question, y = PBSLoad, fill=Questionnaires)) +
+  geom_bar(stat = "identity") + 
+  scale_fill_manual(guide = FALSE, values=FA_color, name="Questionnaires", breaks=c("Self report", "Voting", "SECS", "RWA", "LWA", "Political Issues", "Belief Superiority", "Dog"),labels=c("Political Orientation", "Voting", "SECS", "RWA", "LWA", "Political Issues", "Belief Superiority", "Dogmatism"))+
+  labs(y = "Loadings") +  theme_classic(base_size = 26) +
+  theme(axis.ticks = element_blank() ,axis.text.x = element_blank(),axis.line = element_blank(),legend.title=element_blank(), axis.title.x = element_blank()) +
+  expand_limits(y=c(-.9,.9)) 
+pl_FAPBS
+```
+
+## Relationships between the Factor Scores
+
+### Pre-Processing
+
+We next probe the relationships between the factor scores.
+
+To do so, we first extract each individual's factor scores.
+
+```{r}
+FactorScores <- fa_results$scores # extract the factor scores from results
+FactorScores <- FactorScores[1:(N_S1+N_S2),] # we get rid of the subjects from Rollwage et al.
+
+Df_FAScores <- data.frame(ID = IDs_Full, PolOrient = FactorScores[,1], Dogmatism = FactorScores[,2], PBS = FactorScores[,3], Study = StudyVector)
+```
+
+First, we investigate the relationship between political orientation and dogmatism. We thereby always test three different relationships: A linear one, a quadratic one and finally a combined linear-quadratic one. We compare the BICs (as reported in the SI) to chose the best fit and then get the statistics for the relevant variables from that fit.
+
+To automize the BIC comparison, we set-up a function:
+
+```{r}
+CompareModelFits <- function(iv, dv){
+  m_linear <- lm(iv ~ dv)
+  m_square <- lm(iv ~ I(dv^2))
+  m_squali <- lm(iv ~ I(dv^2) + dv)
+  print(paste("BIC(linear):", BIC(m_linear)))
+  print(paste("BIC(squared):", BIC(m_square)))
+  print(paste("BIC(squared/linear):", BIC(m_squali)))
+}
+```
+
+We now split the data by the two studies:
+
+```{r}
+Df_S1FScores <- Df_FAScores[which(Df_FAScores$Study == "Study1"),]
+Df_S2FScores <- Df_FAScores[which(Df_FAScores$Study == "Study2"),]
+```
+
+We also z-score them:
+
+```{r}
+Df_S1FScores <- data.frame(ID = Df_S1FScores$ID, scale(Df_S1FScores[,2:4])) # we of course do not scale the ID variable
+Df_S2FScores <- data.frame(ID = Df_S2FScores$ID, scale(Df_S2FScores[,2:4]))
+```
+
+
+### Model comparison and analysis
+
+We now run the actual analysis. We start with the relationship between *dogmatism and political orientation*.
+
+```{r}
+print("Study 1 results:")
+CompareModelFits(Df_S1FScores$Dogmatism, Df_S1FScores$PolOrient)
+print("Study 2 results:")
+CompareModelFits(Df_S2FScores$Dogmatism, Df_S2FScores$PolOrient)
+```
+
+We retrieve the information from the winning model.
+
+```{r}
+print("Study 1:")
+data <- Df_S1FScores
+m_winning <- lm(data$Dogmatism ~ data$PolOrient + I(data$PolOrient^2))
+summary(m_winning)
+formatC(coef(summary(m_winning))[,4], format = "e", digits = 2)
+
+print("Study 2:")
+data <- Df_S2FScores
+m_winning <- lm(data$Dogmatism ~ data$PolOrient + I(data$PolOrient^2))
+summary(m_winning)
+formatC(coef(summary(m_winning))[,4], format = "e", digits = 2)
+```
+
+
+We do the same for *political orientation and political belief superiority*.
+
+```{r}
+print("Study 1 results:")
+CompareModelFits(Df_S1FScores$PBS, Df_S1FScores$PolOrient)
+print("Study 2 results:")
+CompareModelFits(Df_S2FScores$PBS, Df_S2FScores$PolOrient)
+```
+
+We retrieve the information from the winning model.
+
+```{r}
+print("Study 1:")
+data <- Df_S1FScores
+m_winning <- lm(data$PBS ~ data$PolOrient + I(data$PolOrient^2))
+summary(m_winning)
+formatC(coef(summary(m_winning))[,4], format = "e", digits = 2)
+
+print("Study 2:")
+data <- Df_S2FScores
+m_winning <- lm(data$PBS ~ data$PolOrient + I(data$PolOrient^2))
+summary(m_winning)
+formatC(coef(summary(m_winning))[,4], format = "e", digits = 2)
+```
+
+Finally, we do the same for *dogmatism and political belief superiority*.
+
+```{r}
+print("Study 1 results:")
+CompareModelFits(Df_S1FScores$Dogmatism, Df_S1FScores$PBS)
+print("Study 2 results:")
+CompareModelFits(Df_S2FScores$Dogmatism, Df_S2FScores$PBS)
+```
+
+We also get the statistics for the winning model.
+
+```{r}
+print("Study 1:")
+data <- Df_S1FScores
+m_winning <- lm(data$Dogmatism ~ data$PBS)
+summary(m_winning)
+formatC(coef(summary(m_winning))[,4], format = "e", digits = 2)
+
+print("Study 2:")
+data <- Df_S2FScores
+m_winning <- lm(data$Dogmatism ~ data$PBS)
+summary(m_winning)
+formatC(coef(summary(m_winning))[,4], format = "e", digits = 2)
+```
+
+
+### Plotting the Relationships between Factor Scores
+
+We next plot the relationships between the factor scores, as presented in Figure 1.
+
+First, we set up some general settings for the plots
+
+```{r}
+st_FactorScoreAlpha <- 0.3
+st_FactorScoreSize <- 26
+```
+
+We then plot the relationship between **dogmatism and political orientation** (Fig. 1, B).
+
+```{r}
+pl_DogmByPol <- ggplot(Df_FAScores, aes(x=PolOrient, y=Dogmatism)) + geom_point(shape=19,color='royalblue', size = 1.5, alpha = st_FactorScoreAlpha) + 
+  theme_classic(base_size = st_FactorScoreSize) + 
+  stat_smooth(method = "lm", formula = y ~  I(x^2) +x   , size = 2.3, se = FALSE,color='darkblue')+
+  xlab("L - Pol. Orientation - R")+ 
+  ylab("Dogmatism") +
+  coord_cartesian(ylim = c(-2.1, 3.5)) +
+  scale_y_continuous(breaks = round(seq(-2, 3, by = 1),1))
+pl_DogmByPol
+```
+
+Next, we plot **Political Belief Superiority** by **Political Orientation**.
+
+```{r}
+pl_PBSByPol <- ggplot(Df_FAScores, aes(x=PolOrient, y=PBS)) + geom_point(shape=19,color='royalblue', size = 1.5, alpha = st_FactorScoreAlpha) + 
+  theme_classic(base_size = st_FactorScoreSize) + 
+  stat_smooth(method = "lm", formula = y ~  I(x^2) +x   , size = 2.3, se = FALSE,color='darkblue')+
+  xlab("L - Pol. Orientation - R")+ 
+  ylab("Political Belief Superiority") +
+  coord_cartesian(ylim = c(-3.2, 2.1)) +
+  scale_y_continuous(breaks = round(seq(-3, 2, by = 1),1))
+pl_PBSByPol
+```
+
+Next, we plot **Political Belief Superiority** by **Political Orientation**.
+
+```{r}
+pl_PBSByDogm <- ggplot(Df_FAScores, aes(x=Dogmatism, y=PBS)) + geom_point(shape=19,color='royalblue', size = 1.5, alpha = st_FactorScoreAlpha) + 
+  theme_classic(base_size = st_FactorScoreSize) + 
+  stat_smooth(method = "lm", formula = y ~x   , size = 2.3, se = FALSE,color='darkblue')+
+  xlab("Dogmatism")+ 
+  ylab("Political Belief Superiority") +
+  scale_x_continuous(breaks = round(seq(-2, 3, by = 1),1))
+pl_PBSByDogm
+```
+
+### Exporting the plots
+
+We next save this for the actual figures. Below, we present the code that details figure 1. We first save the factor score plots (Fig. 1, A):
+
+```{r}
+pls_factorLoadings <- pl_FAPolOrient / pl_FADogmatism / pl_FAPBS
+```
+
+
+```{r}
+pls_factorScores <- pl_DogmByPol + pl_PBSByPol + pl_PBSByDogm
+```
+
+We do the actual saving.
+
+```{r}
+# # First, the factor loadings
+widthWanted <- 900/dpiScaling
+heightWanted <- 800/dpiScaling
+ggsave(file = "Figures/FactorLoadings.pdf", pls_factorLoadings, device = cairo_pdf, width = widthWanted, height = heightWanted, units = "in", dpi = dpiWanted)
+
+# # Next, the factor scores
+widthWanted <- 1280/dpiScaling
+heightWanted <- 550/dpiScaling
+ggsave(file = "Figures/FactorScores.pdf", pls_factorScores, device = cairo_pdf, width = widthWanted, height = heightWanted, units = "in", dpi = dpiWanted)
+```
+
+
+## General Task Analysis
+
+We now turn to the information seeking task and analyze its data.
+
+First, we check whether participants **seek more information after an initial mistake**, first for study 1:
+
+```{r,message = FALSE}
+m_S1ProbeByAcc1st <- mixed(SeeAgain ~ as.factor(Correct1st) + 
+                        (as.factor(Correct1st)|ID), 
+                        data = Df_S1Task, 
+                        family = binomial,
+                        method = "LRT",
+                        nAGQ =0)
+summary(m_S1ProbeByAcc1st)
+formatC(coef(summary(m_S1ProbeByAcc1st))[,4], format = "e", digits = 2)
+```
+
+... and for study 2:
+
+```{r, message = FALSE}
+m_S2ProbeByAcc1st <- mixed(SeeAgain ~ as.factor(Correct1st) + 
+                        (as.factor(Correct1st)|ID), 
+                        data = Df_S2Task, 
+                        family = binomial,
+                        method = "LRT",
+                        nAGQ =0)
+summary(m_S2ProbeByAcc1st)
+formatC(coef(summary(m_S2ProbeByAcc1st))[,4], format = "e", digits = 2)
+```
+
+Second, we check whether the **final decision accuracy is dependent on a participant's probing choice**, again first for study 1:
+
+```{r, message = FALSE}
+m_S1Acc2ndByProbe <- mixed(Correct2nd ~ as.factor(SeeAgain) + 
+                        (as.factor(SeeAgain)|ID), 
+                        data = Df_S1Task, 
+                        family = binomial,
+                        method = "LRT",
+                        nAGQ = 0)
+summary(m_S1Acc2ndByProbe)
+formatC(coef(summary(m_S1Acc2ndByProbe))[,4], format = "e", digits = 2)
+```
+
+... and then for study 2:
+
+```{r, message = FALSE}
+m_S2Acc2ndByProbe <- mixed(Correct2nd ~ as.factor(SeeAgain) + 
+                        (as.factor(SeeAgain)|ID), 
+                        data = Df_S2Task, 
+                        family = binomial,
+                        method = "LRT",
+                        nAGQ = 0)
+summary(m_S2Acc2ndByProbe)
+formatC(coef(summary(m_S2Acc2ndByProbe))[,4], format = "e", digits = 2)
+```
+
+Following this within-subject analysis, we ask the same question from a between-subject perspective. That is, do participants who seek out more information on our task also end up making more accurate final judgments, and more points on the task?
+
+The first thing we do here is getting the behavioral indicators from the task
+
+```{r}
+# Function that gets task averages
+getTaskAverages <- function(df){
+  summary <- ddply(.data = df,
+                    .variables = .(ID), 
+                    summarize, 
+                    AvPerf1st = mean(Correct1st),
+                    AvConf = mean(Confidence1st),
+                    AvSeek = mean(SeeAgain),
+                    AvPerf2nd = mean(Correct2nd)
+                    )
+  return(summary)
+}
+
+Df_S1BehavInd <- getTaskAverages(Df_S1Task)
+Df_S2BehavInd <- getTaskAverages(Df_S2Task)
+```
+
+We combine this file with maximum reward participants received. At the same time, we also add the demographics and the factor scores to this dataframe. This will be necessary for analyses of the interindividual differences later on.
+
+```{r}
+# Set up function that extends the merge() function so that we can merge many dataframes
+mergemany <- function(listofdfs, by){ 
+  df <- listofdfs[[1]]
+  for (i in 2:length(listofdfs)) {
+    df <- merge(df, listofdfs[[i]], by = by)
+  }
+  return(df)
+}
+
+# We run the function, first specifying the necessary dataframes and then applying the function from above
+listDfS1 <- list(Df_S1FScores, Df_S1Demog, Df_S1BehavInd, Df_S1Add)
+listDfS2 <- list(Df_S2FScores, Df_S2Demog, Df_S2BehavInd, Df_S2Add)
+Df_S1IndividualDiff <- mergemany(listDfS1, "ID")
+Df_S2IndividualDiff <- mergemany(listDfS2, "ID")
+```
+
+We next need to scale these dataframes.
+
+```{r}
+scale_wignore <- function(df, varstoignore){ # we set up a function that only paritally scales a dataframe
+  # we first split the dataframe
+  dfnoscale <- df[varstoignore]
+  varstoignore <- names(df) %in% varstoignore
+  dfscale <- df[!varstoignore]
+  
+  # we scale the necessary items
+  dfscale <- data.frame(scale(dfscale))
+  df <- cbind(dfnoscale, dfscale)
+}
+
+DontScale <- c("ID", "Gender", "Education")
+Df_S1IndScaled <- scale_wignore(Df_S1IndividualDiff, DontScale)
+Df_S2IndScaled <- scale_wignore(Df_S2IndividualDiff, DontScale)
+```
+
+Now, we actually run the analysis for the **relationship between average information search and final decision accuracy**, first for study 1:
+
+```{r}
+m_S1Acc2ndByProbeBetween <- lm(AvPerf2nd ~ AvSeek, Df_S1IndScaled)
+summary(m_S1Acc2ndByProbeBetween)
+formatC(coef(summary(m_S1Acc2ndByProbeBetween))[,4], format = "e", digits = 2)
+```
+
+... and next for study 2:
+
+```{r}
+m_S2Acc2ndByProbeBetween <- lm(AvPerf2nd ~ AvSeek, Df_S2IndScaled)
+summary(m_S2Acc2ndByProbeBetween)
+formatC(coef(summary(m_S2Acc2ndByProbeBetween))[,4], format = "e", digits = 2)
+```
+
+We do the same for the relationship between **maximum points and information seeking**, first investigating study 1:
+
+```{r}
+m_S1PointsByProbeBetween <- lm(MaxPoints ~ AvSeek, Df_S1IndScaled)
+summary(m_S1PointsByProbeBetween)
+formatC(coef(summary(m_S1PointsByProbeBetween))[,4], format = "e", digits = 2)
+```
+
+... and for study 2:
+
+```{r}
+m_S2PointsByProbeBetween <- lm(MaxPoints ~ AvSeek, Df_S2IndScaled)
+summary(m_S2PointsByProbeBetween)
+formatC(coef(summary(m_S2PointsByProbeBetween))[,4], format = "e", digits = 2)
+```
+
+We next check the unique effect of two determinants on the information-seeking decision. First, we check whether **information seeking is dependent on cost**. We first examine data from study 1:
+
+```{r, message = FALSE}
+m_S1ProbeByCost <- mixed(SeeAgain ~ as.factor(InfoCost) + 
+                        (as.factor(InfoCost)|ID), 
+                        data = Df_S1Task, 
+                        family = binomial,
+                        method = "LRT",
+                        nAGQ = 0)
+summary(m_S1ProbeByCost)
+formatC(coef(summary(m_S1ProbeByCost))[,4], format = "e", digits = 2)
+```
+
+... and for study 2:
+
+```{r, message = FALSE}
+m_S2ProbeByCost <- mixed(SeeAgain ~ as.factor(InfoCost) + 
+                        (as.factor(InfoCost)|ID), 
+                        data = Df_S2Task, 
+                        family = binomial,
+                        method = "LRT",
+                        nAGQ = 0)
+summary(m_S2ProbeByCost)
+formatC(coef(summary(m_S2ProbeByCost))[,4], format = "e", digits = 2)
+```
+
+Finally, we investigate the effects of **confidence on information seeking**, again first for study 1:
+
+```{r, message = FALSE}
+m_S1ProbeByConf<-  mixed(SeeAgain ~ Confidence1st + 
+                        (Confidence1st|ID), 
+                        data = Df_S1Task, 
+                        family = binomial,
+                        method = "LRT",
+                        nAGQ = 0)
+summary(m_S1ProbeByConf)
+formatC(coef(summary(m_S1ProbeByConf))[,4], format = "e", digits = 2)
+```
+
+... and for study 2:
+
+```{r, message = FALSE}
+m_S2ProbeByConf<- mixed(SeeAgain ~ Confidence1st + 
+                        (Confidence1st|ID), 
+                        data = Df_S2Task, 
+                        family = binomial,
+                        method = "LRT",
+                        nAGQ = 0)
+summary(m_S2ProbeByConf)
+formatC(coef(summary(m_S2ProbeByConf))[,4], format = "e", digits = 2)
+```
+
+
+
+## Dogmatism and Information Seeking
+
+We next set out to test our main hypothesis: A relationship between dogmatism and information search.
+
+### Preprocessing
+
+We first set-up the predictors and a function that returns the r-squared for a given predictor.
+
+```{r}
+RegressionPredictors <- c("Gender", "Education", "Age", "AvPerf1st", "DotDiff", "AvConf", "AccStronger","AvSeek")
+
+makeFormulaForLm <- function(dv, ivs){
+  f <- as.formula(paste(dv,paste(ivs, collapse = " + "),sep = " ~ "))
+}
+
+fDogmatism <- makeFormulaForLm("Dogmatism", RegressionPredictors)
+
+# Function that return the R² for one predictor in a lm, by comparing a model with with a model without the predictor
+r2fromlm <- function(df, dv, ivs, iv){
+  # Setting up the models
+  f_full <- makeFormulaForLm(dv, ivs)
+  m_full <- lm(f_full, data = df)
+  f_null <- makeFormulaForLm(dv, ivs[ivs != iv])
+  m_null <- lm(f_null, data = df)
+  
+  # Getting the individual R²
+  r2_full <- summary(m_full)$r.squared
+  r2_null <- summary(m_null)$r.squared
+  
+  r2 <- r2_full - r2_null
+  print(paste("R² =", r2))
+  # return(r2)
+}
+```
+
+### Regression between dogmatism and Information Search
+
+We run the regression, first for sample 1:
+
+```{r}
+m_S1_Dogmatism <- lm(fDogmatism, data = Df_S1IndScaled)
+summary(m_S1_Dogmatism)
+r2fromlm(Df_S1IndScaled, "Dogmatism", RegressionPredictors, "AvSeek")
+```
+
+... and for sample 2:
+
+```{r}
+m_S2_Dogmatism <- lm(fDogmatism, data = Df_S2IndScaled)
+summary(m_S2_Dogmatism)
+r2fromlm(Df_S2IndScaled, "Dogmatism", RegressionPredictors, "AvSeek")
+```
+
+
+#### Plotting the GLMs
+
+We next plot these GLM results:
+
+To do so, we first have to load the coefficients from the models and sort them.
+
+```{r}
+# We load the data
+Co_S1Dogmatism <- data.frame(summary(m_S1_Dogmatism)$coefficients)
+Co_S2Dogmatism <- data.frame(summary(m_S2_Dogmatism)$coefficients)
+
+# We prepare the parameters for the plot
+# Function that prepares the coefficients for the plot
+PrepareCoeffDf = function(CoeffDf){
+  CoeffDf$coefficient <- rownames(CoeffDf)
+  # We get rid of the intercept
+  CoeffDf <- CoeffDf[which(CoeffDf$coefficient %!in% c("(Intercept)", "DotDiff", "AccStronger")),]
+  
+  # We "group" the coefficients into categories
+  CoeffDf$Category <- ""
+  CoeffDf[which(CoeffDf$coefficient %in% c("Gender", "Education", "Age")),]$Category <- "Demographics"
+  CoeffDf[which(CoeffDf$coefficient %in% c("AvPerf1st", "DotDiff", "AccStronger")),]$Category <- "Performance"
+  CoeffDf[which(CoeffDf$coefficient %in% c("AvConf")),]$Category <- "Metacognition"
+  CoeffDf[which(CoeffDf$coefficient %in% c("AvSeek")),]$Category <- "Information Search"
+  
+  CoeffDf$Category <- factor(CoeffDf$Category, levels = c("Demographics", "Performance", "Metacognition", "Information Search"))
+  return(CoeffDf)
+}
+
+Co_S1Dogmatism <- PrepareCoeffDf(Co_S1Dogmatism)
+Co_S2Dogmatism <- PrepareCoeffDf(Co_S2Dogmatism)
+Co_S1Dogmatism$Category <- factor(Co_S1Dogmatism$Category, levels = c("Demographics", "Performance", "Metacognition", "Information Search"))
+Co_S2Dogmatism$Category <- factor(Co_S2Dogmatism$Category, levels = c("Demographics", "Performance", "Metacognition", "Information Search"))
+
+# We order the coefficients for the figure
+OrderOfCoeffic <- c("Gender", "Education", "Age", "AvPerf1st", "AvConf", "AvSeek")
+
+# ... and define the names
+NamesOfCoffic <- c("Gender", "Education", "Age", "Initial Accuracy", "Initial Confid.", "Information Search")
+
+# We add the two files together
+Co_S1Dogmatism$Sample <- "Study 1"
+Co_S2Dogmatism$Sample <- "Study 2"
+
+Cos_Dogmatism <- rbind(Co_S1Dogmatism, Co_S2Dogmatism)
+
+
+# We add a function that adds line breaks
+new_lines_adder = function(test.string, interval) {
+   #split at spaces
+   string.split = strsplit(test.string," ")[[1]]
+   # get length of snippets, add one for space
+   lens <- nchar(string.split) + 1
+   # now the trick: split the text into lines with
+   # length of at most interval + 1 (including the spaces)
+   lines <- cumsum(lens) %/% (interval + 1)
+   # construct the lines
+   test.lines <- tapply(string.split,lines,function(line)
+      paste0(paste(line,collapse=" "),"\n"),simplify = TRUE)
+   # put everything into a single string
+   result <- paste(test.lines,collapse="")
+   return(result)
+}
+
+#wrapper for the above, meant for users
+add_newlines = function(x, interval) {
+
+   # make sure, x is a character array   
+   x = as.character(x)
+   # apply splitter to each
+   t = sapply(x, FUN = new_lines_adder, interval = interval,USE.NAMES=FALSE)
+   return(t)
+}
+# These functions are taken from: https://stackoverflow.com/questions/30598347/how-to-deal-with-ggplot2-and-overlapping-labels-on-a-discrete-axis
+
+
+# We add a setting that defines the dodging of the individual parameter points
+set_dodge = .5
+```
+
+We run the actual plot code.
+
+```{r}
+Pl_GLMDogmatism <- ggplot(data=Cos_Dogmatism,aes(x=factor(coefficient, level = OrderOfCoeffic), y=Estimate, color = Category, fill = Sample))+
+  geom_point(size = 6, position=position_dodge(set_dodge)) +
+  geom_hline(yintercept=0) + 
+  theme_classic(base_size = 30) +
+  geom_errorbar(width=.2, size = 1.5, position=position_dodge(set_dodge), aes(ymin=Estimate - Std..Error, ymax= Estimate + Std..Error)) +
+  ylab(expression(paste("Standardized ", beta))) + xlab("") +
+  scale_x_discrete(labels = add_newlines(NamesOfCoffic,16)) +
+  scale_color_manual(values=c("gray", "gray", "gray", "royalblue"), guide = FALSE) +
+  scale_fill_manual(values = c(1,2), guide = FALSE) +
+  coord_cartesian(ylim = c(-.25, .29)) +
+  scale_y_continuous(breaks = round(seq(-.3, .3, by = 0.05),1))
+Pl_GLMDogmatism
+```
+
+We export this:
+
+```{r}
+widthWanted <- 1100/dpiScaling
+heightWanted <- 800/dpiScaling
+ggsave(file = "Figures/GLMDogmatism.pdf", Pl_GLMDogmatism, device = cairo_pdf, width = widthWanted, height = heightWanted, units = "in", dpi = dpiWanted)
+```
+
+### Internal meta-analysis
+
+To get an overall estimate of the influence of information seeking, we pool the samples:
+
+```{r}
+Df_TotalSummary <- rbind(Df_S1IndividualDiff, Df_S2IndividualDiff)
+Df_TotalScaled <- scale_wignore(Df_TotalSummary, DontScale)
+
+summary(lm(fDogmatism, data = Df_TotalScaled))
+r2fromlm(Df_TotalScaled, "Dogmatism", RegressionPredictors, "AvSeek")
+```
+
+
+### Mediation analysis
+
+We next conduct the mediation analyses investigating the link between dogmatism and final decision accuracy, as mediated by subject's average information seeking. We again do this split by dataset.
+
+We first need to specify two models: **Information Search ~ Dogmatism**, Final Performance ~ Dogmatism + Information Search. Note that we are still controlling for the same covariates as before.
+
+We again first set up the formula which will be valid for both studies.
+
+```{r}
+PredictorsSeekByDogma <- c("Gender" , "Education" , "Age" , "DotDiff" , "AvConf" , "AccStronger" , "AvPerf1st" , "Dogmatism")
+PredictorsFinalAcc <- c("Gender" , "Education" , "Age" , "DotDiff" , "AvConf" , "AccStronger" , "AvPerf1st" , "AvSeek" , "Dogmatism")
+f_SeekByDogma <- makeFormulaForLm("AvSeek",PredictorsSeekByDogma)
+f_FinalAcc <- makeFormulaForLm("AvPerf2nd", PredictorsFinalAcc)
+```
+
+We begin with the first study
+
+```{r}
+m_S1Search_Dogma <- lm(f_SeekByDogma, data = Df_S1IndScaled)
+m_S1FinalAcc <- lm(f_FinalAcc, data = Df_S1IndScaled)
+
+summary(m_S1Search_Dogma)
+summary(m_S1FinalAcc)
+```
+
+We then run the actual mediation analysis:
+
+```{r}
+# Note here, that we have to call the mediate function directly from the library to avoid a package conflict
+S1_MediationOutput <- mediation::mediate(m_S1Search_Dogma, m_S1FinalAcc, treat = "Dogmatism", mediator = "AvSeek", sims = set_mediationsims) 
+```
+
+
+```{r}
+summary(S1_MediationOutput)
+```
+
+We do the same for study 2:
+
+```{r}
+m_S2Search_Dogma <- lm(f_SeekByDogma, data = Df_S2IndScaled)
+m_S2FinalAcc <- lm(f_FinalAcc, data = Df_S2IndScaled)
+
+summary(m_S2Search_Dogma)
+summary(m_S2FinalAcc)
+```
+
+We then run the actual mediation analysis:
+
+```{r}
+S2_MediationOutput <- mediation::mediate(m_S2Search_Dogma, m_S2FinalAcc, treat = "Dogmatism", mediator = "AvSeek", sims = set_mediationsims) 
+summary(S2_MediationOutput)
+```
+
+
+```{r}
+summary(S2_MediationOutput)
+```
+
+
+
+### Pooled mediation analyis
+
+```{r}
+m_poolSearch_Dogma <- lm(f_SeekByDogma, data = Df_TotalScaled)
+m_poolFinalAcc <- lm(f_FinalAcc, data = Df_TotalScaled)
+
+summary(m_poolSearch_Dogma)
+summary(m_poolFinalAcc)
+```
+
+We then run the mediation.
+
+```{r}
+# Note here, that we have to call the mediate function directly from the library to avoid a package conflict
+Pool_MediationOutput <- mediation::mediate(m_poolSearch_Dogma, m_poolFinalAcc, treat = "Dogmatism", mediator = "AvSeek", sims = set_mediationsims)
+summary(Pool_MediationOutput)
+```
+
+
+
+### Dogmatism and maximum amount of points gained
+
+We also check whether more dogmatic individuals in fact end up earning less money.
+
+```{r}
+# we first set up the formula
+RegPredMaxPoints <- c("Gender", "Education", "Age ", "AvPerf1st", "DotDiff", "AvConf", "AccStronger", "MaxPoints")
+f_MaxPoints <- makeFormulaForLm("Dogmatism", RegPredMaxPoints)
+```
+
+We run the model for study 1:
+
+```{r}
+m_S1DogMaxPoints <- lm(f_MaxPoints, Df_S1IndScaled)
+summary(m_S1DogMaxPoints)
+r2fromlm(Df_S1IndScaled, "Dogmatism", RegPredMaxPoints, "MaxPoints")
+```
+
+And for study 2:
+
+```{r}
+m_S2DogMaxPoints <- lm(f_MaxPoints, Df_S2IndScaled)
+summary(m_S2DogMaxPoints)
+r2fromlm(Df_S2IndScaled, "Dogmatism", RegPredMaxPoints, "MaxPoints")
+```
+
+As well as for the pooled sample.
+
+```{r}
+m_poolDogMaxPoints <- lm(f_MaxPoints, Df_TotalScaled)
+summary(m_poolDogMaxPoints)
+r2fromlm(Df_TotalScaled, "Dogmatism", RegPredMaxPoints, "MaxPoints")
+```
+
+
+## Trial-by-trial Modelling
+
+We next investigate the relationship between dogmatism and information seeking closer by building and fitting a trial-by-trial model.
+
+### Pre-Processing
+
+First, we pool the two samples for better hiearchical fitting and exclude participants that have less than 5 and more than 95 % information seeking
+
+```{r}
+# 1. We pool the datafiles
+Df_TotalTask <- rbind(Df_S1Task, Df_S2Task)
+Df_TotalSummary <- rbind(Df_S1IndividualDiff, Df_S2IndividualDiff)
+
+# 2. We exclude the subjects that had less than 5 and more than 95 percent information search
+minPercent <- .05
+maxPercent <- .95
+PartsToKeep <- as.character(unique(Df_TotalSummary[which(Df_TotalSummary$AvSeek >= minPercent & Df_TotalSummary$AvSeek <= maxPercent),]$ID))
+Df_TotalTask <- Df_TotalTask[which(Df_TotalTask$ID %in% PartsToKeep),]
+Df_TotalSummary <- Df_TotalSummary[which(Df_TotalSummary$ID %in% PartsToKeep),]
+
+# 3. We change the coding of cost and of the intial correctness so it is centered around 0
+Df_TotalTask[which(Df_TotalTask$InfoCost == 20),]$InfoCost <- 1
+Df_TotalTask[which(Df_TotalTask$InfoCost == 5),]$InfoCost <- -1
+```
+
+STAN takes the data in independent matrices instead of in a single dataframe. This require some preprocessing on the data on our part.
+
+```{r}
+## FIRST, we need to make sure that all participants have 100 trials (with the missing trials receiving a special highlighting)
+# To do so, we create an empty dataframe to be filled with the filled up data
+# This is required to get a dataframe where all subjects have 100 trials
+Df_Filled <- data.frame(matrix(NA, nrow = 0, ncol = ncol(Df_TotalTask)))
+colnames(Df_Filled) <- colnames(Df_TotalTask)
+RowsLackVector <- c() # used to get an overview over how many rows are lacking per participant
+
+for (ID in PartsToKeep) {
+
+  # Per participant, we get their unique datafile
+  TempID <- ID
+  TempDf <- Df_TotalTask[which(Df_TotalTask$ID == TempID),]
+
+  RowsLacking <- 100 - nrow(TempDf)   # gets number of rows lacking
+  RowsLackVector <- cbind(RowsLackVector, RowsLacking)
+
+  if (RowsLacking != 0) {             # In case there are rows lacking
+    AddDf <- TempDf[1:RowsLacking,]   # gets a replacement dataframefrom the original one
+    AddDf$Confidence1st <- 10              # marks this replacement dataframe so that it is not included in the fitting later
+    TempDf <- rbind(TempDf, AddDf)
+  }
+  
+  Df_Filled <- rbind(Df_Filled, TempDf) # we add everything back together
+}
+
+
+## SECOND, we need to get this data into a matrix and the dogmatism factor score into a vector
+# We scale the dogmatism variable for this sample
+Df_TotalSummary$DogmatismScaled <- scale(Df_TotalSummary$Dogmatism)
+
+# We first have to get matrices that contain the per participant data
+Mx_Seek <- matrix(NA,nrow = 100, ncol = length(PartsToKeep))
+Mx_Conf <- matrix(NA,nrow = 100, ncol = length(PartsToKeep))
+Mx_Cost <- matrix(NA,nrow = 100, ncol = length(PartsToKeep))
+V_Dogmatism <- rep(0.00, length(PartsToKeep))
+
+# We next go through every participant in the filled dataframe and add their relevant information to these matrices
+for (ColNumber in 1:length(PartsToKeep)) {
+  TempID <- PartsToKeep[ColNumber]
+  #print(TempID)
+  
+  # We get the task data
+  TempDf <- Df_Filled[which(Df_Filled$ID == TempID),]
+  
+  Mx_Seek[,ColNumber] <- TempDf$SeeAgain
+  Mx_Conf[,ColNumber] <- TempDf$Confidence1st
+  Mx_Cost[,ColNumber] <- TempDf$InfoCost
+
+  # We get the dogmatism data
+  V_Dogmatism[ColNumber] <- Df_TotalSummary[which(Df_TotalSummary$ID == TempID),]$DogmatismScaled
+}
+
+## THIRD, we need to get the data into the list format rSTAN requires
+ModellingData <- list(Participants = length(unique(Df_Filled$ID)),
+                  Trials = nrow(Df_Filled)/length(unique(Df_Filled$ID)), # number of trials per person 
+                  SeeAgain = Mx_Seek,    
+                  Confidence = Mx_Conf,   
+                  Cost = Mx_Cost,
+                  Dogmatism = V_Dogmatism)
+```
+
+
+### Modelling
+
+We specify the model.
+
+```{r}
+Location_StanFile <- "SchulzRollwageDolanFleming_StanModel.stan"
+```
+
+Following the set-up, we actually run the model fitting:
+
+```{r}
+# Running:
+fit <- stan(file = Location_StanFile, 
+        data = ModellingData,
+        iter = set_staniter,
+        warmup = set_stanwarmup
+        )
+```
+
+We inspect the results:
+
+```{r}
+print(fit)
+```
+
+### Statistics of Modelling
+
+First, we have to preprocess the data for us to check the relevant statistics.
+
+```{r}
+# We extract the parameter estimates
+Pm_Embed <- extract(fit)
+# We set up a dataframe:
+Df_ModelPms <- data.frame(b0Embed = Pm_Embed$B0DogEmbed, b1Embed = Pm_Embed$B1DogEmbed, b2Embed = Pm_Embed$B2DogEmbed)
+# We merge the dataframe so that it works better with ggplot
+Df_ModelPms_long <- melt(Df_ModelPms)
+```
+
+### Plotting: Individual
+
+First, we plot the general **distribution of the betas**. To do so, we first need to get the estimates into a manageable format.
+
+```{r}
+# We set up the dataframe
+Df_Parameters <- data.frame(ID = Df_TotalSummary$ID, b0 = NA, b1 = NA, b2 = NA, Dogmatism = Df_TotalSummary$DogmatismScaled, MaxPoints = Df_TotalSummary$MaxPoints)
+
+for (Participant in 1:dim(Pm_Embed$Beta0Individual)[2]) {
+  
+  # We get the paramter from the file
+  b0Individual = mean(Pm_Embed$Beta0Individual[,Participant])
+  b1Individual = mean(Pm_Embed$Beta1Individual[,Participant])
+  b2Individual = mean(Pm_Embed$Beta2Individual[,Participant])
+  
+  Df_Parameters[Participant,]$b0 = b0Individual
+  Df_Parameters[Participant,]$b1 = b1Individual
+  Df_Parameters[Participant,]$b2 = b2Individual
+  
+}
+
+# We get this to a long dataframe
+Df_LogClippedForGraph <- melt(Df_Parameters[,c(1,2,3,4)], id.vars= "ID")
+
+twoDeciPointScale <- function(x) sprintf("%.2f", x) # this function is added to the labels argument of scale_ _continous to add two decimal points
+
+# And then plot the parameters
+Pl_BetaParameters <- ggplot(data=Df_LogClippedForGraph, aes(x=variable, y=value, fill = variable)) + geom_violin(alpha = 1, colour = "white") +
+  theme_classic(base_size = 26) +
+  geom_jitter(color = "black", alpha = 0.075) +
+  geom_hline(yintercept=0) +
+  scale_fill_manual(values=c("#595AB3", "#ed7d31", "grey"), name = "Betas", guide = FALSE) +
+  scale_y_continuous(breaks = round(seq(-5, 5, by = 2.5),1), name = "Estimate", labels = twoDeciPointScale) +
+  scale_x_discrete(labels = c("0", "1", "2")) +
+  coord_cartesian(ylim = c(-7, 6)) +
+  xlab(expression(beta))
+Pl_BetaParameters
+```
+
+We next plot the **distribution of the posterior estimates for the rho parameter**:
+
+```{r}
+# We need to do some processing
+Iterations = length(Df_ModelPms$b0Embed) # this is important because it specifices the iterations
+Df_Rho1 <- data.frame(Epsilon = replicate(Iterations, "rho0"), Estimate = Df_ModelPms$b0Embed)
+Df_Rho2 <- data.frame(Epsilon = replicate(Iterations, "rho1"), Estimate = Df_ModelPms$b1Embed)
+Df_Rho3 <- data.frame(Epsilon = replicate(Iterations, "rho2"), Estimate = Df_ModelPms$b2Embed)
+
+Df_Rhos <- rbind(Df_Rho1, Df_Rho2, Df_Rho3)
+
+# And then plot the parameters
+scaleBy1000 <- function(x) sprintf("%.1f", x/1000)
+Pl_RhoParametersDensity <- ggplot(data=Df_Rhos, aes(x=Estimate, fill = Epsilon, color = Epsilon)) +
+  theme_classic(base_size = 26) +
+  coord_cartesian(xlim = c()) +
+  geom_density(aes(y = .1 * ..count..), alpha = .5, size = 1) +
+  scale_color_manual(values=c("#595AB3", "#ed7d31", "grey"), guide = FALSE) +
+  scale_fill_manual(values=c("#595AB3", "#ed7d31", "grey"), guide = FALSE) +
+  ylab("Count (1000)") +
+  scale_y_continuous(labels = scaleBy1000) +
+  geom_vline(xintercept = 0, size = 1, linetype = "longdash")
+Pl_RhoParametersDensity
+```
+
+Next, we plot the model predictions, split by the most dogmatic and the remaining participants. First, this requires some preprocessing.
+
+```{r}
+# We first need to 'split' the data
+DogmatismCutOff <- .9
+Df_Parameters$PercentRankDogmatism<-rank(Df_Parameters$Dogmatism)/length(Df_Parameters$Dogmatism)
+Df_Parameters$DogmatismGroup <- "Moderates"
+Df_Parameters[which(Df_Parameters$PercentRankDogmatism > DogmatismCutOff),]$DogmatismGroup <- "Dogmatists"
+
+# We then need to get summary statistics for the two groups
+Df_ForModelPredictions <- Df_Parameters[,c(1,2,3,4,7)]
+Df_ForModelPredictions <- melt(Df_Parameters, id.vars= c("ID", "DogmatismGroup"))
+
+Df_ParameterSplits <- ddply(.data = Df_Parameters,
+                       .variables = .(DogmatismGroup), 
+                       summarize, 
+                       AvBeta0 = mean(b0),
+                       AvBeta1 = mean(b1)
+                       )
+Df_ParameterSplits
+```
+
+We then run the actual plotting.
+
+```{r}
+Beta0Dogmat <- Df_ParameterSplits[1,2]
+Beta1Dogmat <- Df_ParameterSplits[1,3]
+Beta0Moderat <- Df_ParameterSplits[2,2]
+Beta1Moderat <- Df_ParameterSplits[2,3]
+
+LogFunDogmat = function(x){1/(1+exp(-((Beta1Dogmat*x+Beta0Dogmat))))}
+LogFunModerat = function(x){1/(1+exp(-((Beta1Moderat*x+Beta0Moderat))))}
+
+set_lineSize <- 1
+set_colourDogm <- "magenta"
+set_colourMode <- "deepskyblue"
+
+
+Pl_ModelResults <- ggplot(data.frame(x=c(-1, 1)), aes(x=x)) + 
+  stat_function(fun=LogFunModerat, geom="area", fill = set_colourMode, alpha = .1, colour = set_colourMode, size = set_lineSize) +
+  stat_function(fun=LogFunDogmat, geom="area", fill = set_colourDogm, alpha = .1, colour = set_colourDogm, size = set_lineSize) +
+  ylab("Information Search") + xlab("Confidence") +
+  coord_cartesian(ylim=c(0,1)) + 
+  theme_classic(base_size = 26) +
+  scale_x_continuous(breaks = c(-1,0,1), labels = c("low","medium","high"))
+Pl_ModelResults
+```
+
+Finally, we plot the actual data.
+
+```{r}
+# First, we need to get a summary dataframe
+Df_SeekByConf <- ddply(.data = Df_TotalTask,
+                       .variables = .(ID, Confidence1st), 
+                       summarize, 
+                       AvSeek = mean(SeeAgain)
+                       )
+
+# We also need to add the dogmatism group to it
+Df_SeekByConf$DogmatismGroup <- NA
+
+for (row in 1:nrow(Df_SeekByConf)){
+  currentID <- as.character(Df_SeekByConf[row,]$ID)
+  Df_SeekByConf[row,]$DogmatismGroup <- Df_Parameters[which(Df_Parameters$ID == currentID),]$DogmatismGroup
+}
+
+Pl_SeeAgainBy_ConfidenceAndDogmatism <- ggplot(data=Df_SeekByConf, aes(x=as.factor(Confidence1st), y=AvSeek, colour = DogmatismGroup)) +
+  geom_boxplot(size = 1) +
+  theme_classic(base_size = 26) +
+  coord_cartesian(ylim = c(0, 1)) +
+  ylab("Information Search") +
+  scale_x_discrete(name =  "Confidence", labels = c("low", "medium", "high")) +
+  scale_color_manual(values=c(set_colourDogm, set_colourMode), name = "Dogmatism Group", guide = FALSE)
+Pl_SeeAgainBy_ConfidenceAndDogmatism
+```
+
+### Plotting: Entire Figure 
+
+For the entire plotting figure, we still add two toy figures explaining the model: A sigmoid and a normal distribution.
+
+```{r}
+## FIRST, we plot the sigmoid
+Beta0 <- 0
+Beta1 <- -5
+LogFunOrig = function(x){(1/(1+exp(-(Beta1*x+Beta0))))}
+LogFun = function(x){(1/(1+exp(-(Beta1*x+Beta0))))}
+
+Pl_Sigmoid <- ggplot(data.frame(x=c(-1, 1)), aes(x=x)) + 
+  stat_function(fun=LogFun, geom="area", fill = "black", alpha = .3, size = 2) + 
+  xlab("Confidence") + ylab("Information Search") + coord_cartesian(ylim=c(0,1)) + 
+  theme_classic(base_size = 26) +
+  scale_x_continuous(breaks = c(-1,0,1), labels = c("low","medium","high"))
+Pl_Sigmoid
+
+
+# SECOND, we plot the normal distribution
+NormMean <- .5
+NormSD <- .6
+NormDensFun = function(x){dnorm(x, NormMean, NormSD)}
+
+Pl_Normal <- ggplot(data.frame(x=c(-1, 1)), aes(x=x)) + 
+  stat_function(fun=NormDensFun, geom="area", fill = "black", alpha = .3) + 
+  ylab("Density") + coord_cartesian(ylim=c(0,1.5)) + 
+  theme_classic(base_size = 26) +
+  scale_x_continuous(name = "Estimate", limits = c(-2.5,2.5)) + 
+  scale_y_continuous(labels = twoDeciPointScale)
+Pl_Normal
+```
+
+Finally, we add all these plots together:
+
+```{r}
+Pls_FullModelling <- (Pl_Sigmoid + Pl_BetaParameters) / (Pl_Normal + Pl_RhoParametersDensity) / (Pl_ModelResults + Pl_SeeAgainBy_ConfidenceAndDogmatism)
+Pls_FullModelling
+```
+
+We save this:
+
+```{r}
+dpiWanted <- 100
+heightWanted <- 1300/dpiWanted
+widthWanted <- 950/dpiWanted
+
+ggsave(file = "Figures/FullModelling.pdf", a, device = cairo_pdf, width = widthWanted, height = heightWanted, units = "in", dpi = 300)
+```
+
+
+## Interindividual Differences 
+
+We end the analyses by investigating the relationships between information seeking and our remaining factor scores.
+
+### Political Orientation
+
+First, we investigate information seeking's relationship with **political orientation**:
+
+```{r}
+# We first specify the formula:
+fPolOrient <- makeFormulaForLm("PolOrient", RegressionPredictors)
+```
+
+And run the models, first for study 1:
+
+```{r}
+m_S1PolOrient <- lm(fPolOrient, data = Df_S1IndScaled)
+summary(m_S1PolOrient)
+```
+
+And for study 2:
+
+```{r}
+m_S2PolOrient <- lm(fPolOrient, data = Df_S2IndScaled)
+summary(m_S2PolOrient)
+```
+
+Next, we investigate the relationship between information search and **the absolute value of political orientation**.
+Again, we first set up a relevant scaled variable and the formula for this
+
+```{r}
+# We set up the variable for this
+Df_S1IndScaled$AbsPolOrient <- abs(Df_S1IndScaled$PolOrient)
+Df_S2IndScaled$AbsPolOrient <- abs(Df_S2IndScaled$PolOrient)
+# ... and we scale this variable
+Df_S1IndScaled$AbsPolOrient <- scale(Df_S1IndScaled$AbsPolOrient)
+Df_S2IndScaled$AbsPolOrient <- scale(Df_S2IndScaled$AbsPolOrient)
+
+# We set up the formula
+fAbsPolOrient <- makeFormulaForLm("AbsPolOrient", RegressionPredictors)
+```
+
+We run the analysis for study 1:
+
+```{r}
+m_S1AbsPolOrient <- lm(fAbsPolOrient, data = Df_S1IndScaled)
+summary(m_S1AbsPolOrient)
+```
+
+And for study 2:
+
+```{r}
+m_S2AbsPolOrient <- lm(fAbsPolOrient, data = Df_S2IndScaled)
+summary(m_S2AbsPolOrient)
+```
+
+### Political Belief Superiority
+
+Finally, we do the same for the last factor, **political belief superiority**.
+Again, we first set up a formula:
+
+```{r}
+fPBS <- makeFormulaForLm("PBS", RegressionPredictors)
+```
+
+We run the actual analyses.
+
+```{r}
+m_S1PBS <- lm(fPBS, data = Df_S1IndScaled)
+summary(m_S1PBS)
+```
+
+And for study 2:
+
+```{r}
+m_S2PBS <- lm(fPBS, data = Df_S2IndScaled)
+summary(m_S2PBS)
+```
+
+
+____ 
+
+# Analysis: Methods and SI
+
+## Demographic information
+
+### Gender
+
+We probe the participant's demographics. First, we investigate the distribution of genders:
+
+```{r}
+# Function that gets the distributions
+GenderDistr <- function(df){
+  genderVector <- c("Female", "Would rather not say", "Male")
+  df_Gender <- data.frame(genderVector)
+  df_Gender <- cbind(df_Gender, count(df$Gender))
+  df_Gender$Percent <- df_Gender$freq/sum(df_Gender$freq)*100
+  return(df_Gender)
+}
+
+GenderDistr(Df_S1Demog)
+GenderDistr(Df_S2Demog)
+```
+
+### Age
+
+We investigate participant's ages, first looking at the summary statistics.
+
+```{r}
+# Study 1:
+mean(Df_S1Demog$Age)
+sd(Df_S1Demog$Age)
+min(Df_S1Demog$Age)
+max(Df_S1Demog$Age)
+
+# Study 2
+mean(Df_S2Demog$Age)
+sd(Df_S2Demog$Age)
+min(Df_S2Demog$Age)
+max(Df_S2Demog$Age)
+
+summary(Df_S1Demog$Age)
+summary(Df_S2Demog$Age)
+```
+
+We then plot the age distribution
+
+```{r}
+Pl_S1AgeDistribution <- ggplot(data = Df_S1Demog, aes(Age)) + 
+  geom_histogram(binwidth = 2, fill = "royalblue") +
+  theme_classic(base_size = 26) +
+  coord_cartesian(xlim = c()) +
+  geom_density(aes(y= 2 * ..count..), fill = "grey", alpha = .3) +
+  ylab("Count")  + 
+  scale_x_continuous(limits = c(17,83)) +
+  scale_y_continuous(limits = c(0,45))
+Pl_S1AgeDistribution
+```
+
+
+```{r}
+Pl_S2AgeDistribution <- ggplot(data = Df_S2Demog, aes(Age)) + 
+  geom_histogram(binwidth = 2, fill = "royalblue") +
+  theme_classic(base_size = 26) +
+  coord_cartesian(xlim = c()) +
+  geom_density(aes(y= 2 * ..count..), fill = "grey", alpha = .3) +
+  ylab("Count") + 
+  scale_x_continuous(limits = c(17,83)) +
+  scale_y_continuous(limits = c(0,45))
+Pl_S2AgeDistribution
+```
+
+### Education
+
+We also investigate the distribution of educational attainment in our samples
+
+```{r}
+EduFreq <- data.frame(Education = c("High school or equivalent", "Some college", "Bachelor's degree", "Master's degree", "Doctoral degree", "Other"))
+S1EduFreq <- cbind(EduFreq, count(Df_S1Demog$Education))
+
+Pl_S1Education <-ggplot(data = S1EduFreq, aes(x = factor(Education, level = c("High school or equivalent", "Some college", "Bachelor's degree", "Master's degree", "Doctoral degree", "Other")), y = freq)) + 
+  geom_bar(stat = "identity", fill= "royalblue") +
+  theme_classic(base_size = 26) +
+  scale_x_discrete(labels = c("HS", "SoC", "BA", "MA", "PhD", "Other"), name = "Education") +
+  ylab("Count") +
+  scale_y_continuous(limits = c(0,155))
+Pl_S1Education
+```
+
+```{r}
+S2EduFreq <- cbind(EduFreq, count(Df_S2Demog$Education))
+Pl_S2Education <-ggplot(data = S2EduFreq, aes(x = factor(Education, level = c("High school or equivalent", "Some college", "Bachelor's degree", "Master's degree", "Doctoral degree", "Other")), y = freq)) + 
+  geom_bar(stat = "identity", fill= "royalblue") +
+  theme_classic(base_size = 26) +
+  scale_x_discrete(labels = c("HS", "SoC", "BA", "MA", "PhD", "Other"), name = "Education") +
+  ylab("Count") + 
+  scale_y_continuous(limits = c(0,155))
+Pl_S2Education
+```
+
+### Demographics Figure (S1)
+
+We combine this (see Fig S1).
+
+```{r}
+pls_S1 <- (Pl_S1AgeDistribution + Pl_S2AgeDistribution) / (Pl_S1Education + Pl_S2Education)
+pls_S1
+```
+
+We do the actual saving.
+
+```{r}
+widthWanted <- 1150/dpiScaling
+heightWanted <- 700/dpiScaling
+ggsave(file = "Figures/Fig_S1new.pdf", pls_S1, device = cairo_pdf, width = widthWanted, height = heightWanted, units = "in", dpi = dpiWanted)
+```
+
+### Political Orientation
+
+We next investigate the average self-reported political orientation from very liberal to conservative as per our questionnaire
+
+```{r}
+mean(Df_S1Quest$overallConservatism1)
+sd(Df_S1Quest$overallConservatism1)
+```
+
+```{r}
+mean(Df_S2Quest$overallConservatism1)
+sd(Df_S2Quest$overallConservatism1)
+```
+
+
+## Task indices
+
+### Average pay-off
+
+We probe the average points-based points:
+
+```{r}
+getPointsBasedBonus <- function(df){
+  Df_Pay <- df$MaxPoints
+  Df_Bonus <- (Df_Pay/100)*0.04
+  print(mean(Df_Bonus))
+  print(sd(Df_Bonus))
+}
+
+getPointsBasedBonus(Df_S1IndividualDiff)
+getPointsBasedBonus(Df_S2IndividualDiff)
+```
+
+### Averag accuracies: first stimulus and stronger stimulus
+
+We also probe the average accuracy for the first decision:
+
+```{r}
+mean(Df_S1IndividualDiff$AvPerf1st)*100
+sd(Df_S1IndividualDiff$AvPerf1st)*100
+```
+
+```{r}
+mean(Df_S2IndividualDiff$AvPerf1st)*100
+sd(Df_S2IndividualDiff$AvPerf1st)*100
+```
+
+Next, we investigate the average accuracy of the stronger stimulus, as captured in the calibration phase:
+
+```{r}
+mean(Df_S1IndividualDiff$AccStronger)*100
+sd(Df_S1IndividualDiff$AccStronger)*100
+```
+
+```{r}
+mean(Df_S2IndividualDiff$AccStronger)*100
+sd(Df_S2IndividualDiff$AccStronger)*100
+```
+
+### Relationship between task parameters and success
+
+We next investigate the relationship between subject's task performance and their model paramters. First, we set up a relevant dataframe.
+
+```{r}
+# We add the maximum points earned to the parameter dataframe
+Df_Parameters$MaxPoints <- Df_TotalSummary$MaxPoints
+Df_Parameters$AvPerf1st <- Df_TotalSummary$AvPerf1st
+Df_scaleParameters <- scale_wignore(Df_Parameters, c("ID", "DogmatismGroup"))
+```
+
+Next, we get the relationship between the parameters and the maximum points.
+
+```{r}
+m_PointsByBetas <- lm(data = Df_scaleParameters, MaxPoints ~ b0 + b1 + b2 + AvPerf1st)
+summary(m_PointsByBetas)
+formatC(coef(summary(m_PointsByBetas))[,4], format = "e", digits = 2)
+```
+
+## Task plots
+
+We set up the task plots. Initially, we set up some general values for this plotting.
+
+```{r}
+st_S2_size <- 15
+st_S2_alpha <- .15
+st_S2_boxplalpha <- .5
+
+Df_Task <- rbind(Df_S1Task, Df_S2Task)
+```
+
+We then set up the indiviual plots:
+
+```{r}
+# First, we plot information seeking by the accuracy on the intitial decision
+Df_InfoByCorr <- ddply(.data = Df_Task,
+                       .variables = .(ID, Correct1st), 
+                       summarize, 
+                       AvSeeAgain = mean(SeeAgain)
+                       )
+
+Pl_InfoByCorr <- ggplot(data=Df_InfoByCorr, aes(x=as.factor(Correct1st), y=AvSeeAgain)) +
+  geom_boxplot(fill = "grey", alpha=st_S2_boxplalpha) +
+  theme_classic(base_size = st_S2_size) + 
+  geom_jitter(color = "royalblue", alpha = st_S2_alpha) +
+  coord_cartesian(ylim = c(0, 1.10)) +
+  ylab("Average Information Seeking") + scale_x_discrete(name = "Accuracy on Initial Decision", labels = c("Incorrect", "Correct"))
+Pl_InfoByCorr
+
+# We then plot final decision accuracy by the information seeking choice
+Df_Corr2ByInfo <- ddply(.data = Df_Task,
+                       .variables = .(ID, SeeAgain), 
+                       summarize, 
+                       AvCorr2nd = mean(Correct2nd)
+                       )
+
+Pl_Corr2ByInfo <- ggplot(data=Df_Corr2ByInfo, aes(x=as.factor(SeeAgain), y=AvCorr2nd)) +
+  geom_boxplot(fill = "grey", alpha=st_S2_boxplalpha) +
+  theme_classic(base_size = st_S2_size) + 
+  geom_jitter(color = "royalblue", alpha = st_S2_alpha) +
+  coord_cartesian(ylim = c(0.45, 1.05)) +
+  ylab(expression(paste("Accuracy on Final Decision"))) +
+  scale_x_discrete(name = "Information Seeking", labels = c("No", "Yes"))
+Pl_Corr2ByInfo
+
+# We plot the relationship between average information seeking and average final decision accuracy
+Df_IndDiff <- rbind(Df_S1IndividualDiff, Df_S2IndividualDiff)
+
+Pl_AvInfoByAvPerf2nd <- ggplot(Df_IndDiff, aes(y = AvPerf2nd, x = AvSeek)) +
+  geom_point(color = "royalblue", alpha = 0.4) +
+  geom_smooth(method ="lm", color = "black") +
+  theme_classic(base_size = st_S2_size) +
+  coord_cartesian(ylim = c(0.6, 1), xlim = c(0,1) ) +
+  xlab("Average Information Seeking") + ylab(expression(paste("Accuracy on Final Decision")))
+
+Pl_AvInfoByAvPerf2nd
+
+# We plot the proportion of information seeking as a function of the informational cost
+Df_SeeAgainByCost <- ddply(.data = Df_Task,
+                       .variables = .(ID, InfoCost), 
+                       summarize, 
+                       AvSeeAgain = mean(SeeAgain)
+                       )
+
+Pl_InfoByCost <- ggplot(data=Df_SeeAgainByCost, aes(x=as.factor(InfoCost), y=AvSeeAgain)) +
+  geom_boxplot(fill = "grey", alpha=st_S2_boxplalpha) +
+  theme_classic(base_size = st_S2_size) + 
+  geom_jitter(color = "royalblue", alpha = st_S2_alpha) +
+  coord_cartesian(ylim = c(0, 1.10)) +
+  ylab("Average Information Seeking") + xlab("Information Cost")
+Pl_InfoByCost
+
+# Finally, we plot information seeking by initial decision confidence
+Df_InfoByConf <- ddply(.data = Df_Task,
+                       .variables = .(ID, Confidence1st), 
+                       summarize, 
+                       AvSeeAgain = mean(SeeAgain)
+                       )
+
+Pl_InfoBy_Confidence <- ggplot(data=Df_InfoByConf, aes(x=as.factor(Confidence1st), y=AvSeeAgain)) +
+  geom_boxplot(fill = "grey", alpha=st_S2_boxplalpha) +
+  theme_classic(base_size = st_S2_size) + 
+  geom_jitter(color = "royalblue", alpha = st_S2_alpha) +
+  coord_cartesian(ylim = c(0, 1.10)) +
+  ylab("Average Information Seeking") +
+  scale_x_discrete(name =  "Confidence on Initial Decision", labels = c("low", "medium", "high"))
+Pl_InfoBy_Confidence
+```
+
+We now plot these together to form the entire figure:
+
+```{r}
+pls_S2 <- Pl_InfoByCorr + Pl_AvInfoByAvPerf2nd + Pl_InfoBy_Confidence + Pl_Corr2ByInfo + Pl_InfoByCost +  plot_layout(nrow = 3, byrow = FALSE)
+pls_S2
+```
+
+We save this:
+
+```{r}
+widthWanted <- 700/dpiScaling
+heightWanted <- 1000/dpiScaling
+ggsave(file = "Figures/Fig_S2.pdf", pls_S2, device = cairo_pdf, width = widthWanted, height = heightWanted, units = "in", dpi = dpiWanted)
+```
+
+## Plots for GLMS of other Factorscores
+
+We also plot the two GLMs for "Political Orientation" and "Political Belief Superiority".
+
+We begin by pre-processing the two models:
+
+```{r}
+# For political orientation
+Co_S1PolOrient <- data.frame(summary(m_S1PolOrient)$coefficients)
+Co_S2PolOrient <- data.frame(summary(m_S2PolOrient)$coefficients)
+Co_S1PolOrient <- PrepareCoeffDf(Co_S1PolOrient)
+Co_S2PolOrient <- PrepareCoeffDf(Co_S2PolOrient)
+Co_S1PolOrient$Category <- factor(Co_S1PolOrient$Category, levels = c("Demographics", "Performance", "Metacognition", "Information Search"))
+Co_S2PolOrient$Category <- factor(Co_S2PolOrient$Category, levels = c("Demographics", "Performance", "Metacognition", "Information Search"))
+Co_S1PolOrient$Sample <- "Study 1"
+Co_S2PolOrient$Sample <- "Study 2"
+Cos_PolOrient <- rbind(Co_S1PolOrient, Co_S2PolOrient)
+
+# For extremism (absolute political orientation)
+Co_S1Extreme <- data.frame(summary(m_S1AbsPolOrient)$coefficients)
+Co_S2Extreme <- data.frame(summary(m_S2AbsPolOrient)$coefficients)
+Co_S1Extreme <- PrepareCoeffDf(Co_S1Extreme)
+Co_S2Extreme <- PrepareCoeffDf(Co_S2Extreme)
+Co_S1Extreme$Category <- factor(Co_S1Extreme$Category, levels = c("Demographics", "Performance", "Metacognition", "Information Search"))
+Co_S2Extreme$Category <- factor(Co_S2Extreme$Category, levels = c("Demographics", "Performance", "Metacognition", "Information Search"))
+Co_S1Extreme$Sample <- "Study 1"
+Co_S2Extreme$Sample <- "Study 2"
+Cos_Extreme <- rbind(Co_S1Extreme, Co_S2Extreme)
+
+
+# For political belief superiority
+Co_S1PBS <- data.frame(summary(m_S1PBS)$coefficients)
+Co_S2PBS <- data.frame(summary(m_S2PBS)$coefficients)
+Co_S1PBS <- PrepareCoeffDf(Co_S1PBS)
+Co_S2PBS <- PrepareCoeffDf(Co_S2PBS)
+Co_S1PBS$Category <- factor(Co_S1PBS$Category, levels = c("Demographics", "Performance", "Metacognition", "Information Search"))
+Co_S2PBS$Category <- factor(Co_S2PBS$Category, levels = c("Demographics", "Performance", "Metacognition", "Information Search"))
+Co_S1PBS$Sample <- "Study 1"
+Co_S2PBS$Sample <- "Study 2"
+Cos_PBS <- rbind(Co_S1PBS, Co_S2PBS)
+
+
+# We define the size of this figure
+st_GLMplusSize <- 15
+```
+
+We set up the plots for political orientation ...
+
+```{r}
+Pl_GLMPolOrient <- ggplot(data=Cos_PolOrient,aes(x=factor(coefficient, level = OrderOfCoeffic), y=Estimate, color = Category, fill = Sample))+
+  geom_hline(yintercept=0) + 
+  geom_point(size = 6, position=position_dodge(set_dodge)) +
+  theme_classic(base_size = st_GLMplusSize) +
+  geom_errorbar(width=.2, size = 1.5, position=position_dodge(set_dodge), aes(ymin=Estimate - Std..Error, ymax= Estimate + Std..Error)) +
+  ylab(expression(paste("Standardized ", beta))) + xlab("") +
+  scale_x_discrete(labels = add_newlines(NamesOfCoffic,16)) +
+  scale_color_manual(values=c("gray", "gray", "gray", "royalblue"), guide = FALSE) +
+  scale_fill_manual(values = c(1,2), guide = FALSE) +
+  coord_cartesian(ylim = c(-.25, .32)) +
+  scale_y_continuous(breaks = round(seq(-.3, .3, by = 0.05),1)) +
+  ggtitle("Predictors of Political Orientation")
+Pl_GLMPolOrient
+```
+
+... and for absolute political orientation.
+
+```{r}
+Pl_GLMExterme <- ggplot(data=Cos_Extreme,aes(x=factor(coefficient, level = OrderOfCoeffic), y=Estimate, color = Category, fill = Sample))+
+  geom_hline(yintercept=0) + 
+  geom_point(size = 6, position=position_dodge(set_dodge)) +
+  theme_classic(base_size = st_GLMplusSize) +
+  geom_errorbar(width=.2, size = 1.5, position=position_dodge(set_dodge), aes(ymin=Estimate - Std..Error, ymax= Estimate + Std..Error)) +
+  ylab(expression(paste("Standardized ", beta))) + xlab("") +
+  scale_x_discrete(labels = add_newlines(NamesOfCoffic,16)) +
+  scale_color_manual(values=c("gray", "gray", "gray", "royalblue"), guide = FALSE) +
+  scale_fill_manual(values = c(1,2), guide = FALSE) +
+  coord_cartesian(ylim = c(-.25, .29)) +
+  scale_y_continuous(breaks = round(seq(-.3, .3, by = 0.05),1)) +
+  ggtitle("Predictors of Absolute Political Orientation")
+Pl_GLMExterme
+```
+
+We do the same for PBS.
+
+```{r}
+Pl_GLMPBS <- ggplot(data=Cos_PBS,aes(x=factor(coefficient, level = OrderOfCoeffic), y=Estimate, color = Category, fill = Sample))+
+  geom_hline(yintercept=0) + 
+  geom_point(size = 6, position=position_dodge(set_dodge)) +
+  theme_classic(base_size = st_GLMplusSize) +
+  geom_errorbar(width=.2, size = 1.5, position=position_dodge(set_dodge), aes(ymin=Estimate - Std..Error, ymax= Estimate + Std..Error)) +
+  ylab(expression(paste("Standardized ", beta))) + xlab("") +
+  scale_x_discrete(labels = add_newlines(NamesOfCoffic,16)) +
+  scale_color_manual(values=c("gray", "gray", "gray", "royalblue"), guide = FALSE) +
+  scale_fill_manual(values = c(1,2), guide = FALSE) +
+  coord_cartesian(ylim = c(-.25, .29)) +
+  scale_y_continuous(breaks = round(seq(-.3, .3, by = 0.05),1)) +
+  ggtitle("Predictors of Political Belief Superiority")
+Pl_GLMPBS
+```
+
+We plot these together.
+
+```{r}
+pls_S3 <- Pl_GLMPolOrient / Pl_GLMExterme / Pl_GLMPBS
+```
+
+We save this.
+
+```{r}
+widthWanted <- 730/dpiScaling
+heightWanted <- 1100/dpiScaling
+ggsave(file = "Figures/Fig_S3.pdf", pls_S3, device = cairo_pdf, width = widthWanted, height = heightWanted, units = "in", dpi = dpiWanted)
+```
+
+
+## Factor Analysis
+
+We investigate the loadings of the questionnaires.
+
+```{r}
+ListOfQuestions <- read.csv("Questionnaires/InfoPol_QuestionList.csv")
+
+Df_QuestionByQuestion <- cbind(ListOfQuestions, Df_loadings)
+print(Df_QuestionByQuestion)
+```
+
+
+### Factor structure with only the information seeking data.
+
+We investigate the factor structure with only the new data.
+
+```{r}
+N_new <- N_S1 + N_S2
+Df_ForFA_new <- Df_ForFA[1:N_new,]
+Df_ForFA_new <- data.matrix(Df_ForFA_new, rownames.force = NA) # and prepare it as a matrix
+```
+
+We check the dimensions of this new datafile. This should return 734 participants with 78 questions each.
+
+```{r}
+dim(Df_ForFA_new)
+```
+
+We first conduct the Cattell-Nelson-Gorsuch test to get the number of factors.
+
+```{r}
+CNG_new <- nCng(cor(Df_ForFA_new), cor=TRUE, model="factors", details=TRUE) # run the tes
+fa_Nfactors_new <- CNG_new$nFactors # save the number of factors
+fa_Nfactors_new # return it
+```
+
+We next run the actual factor analysis.
+
+```{r}
+fa_results_new <- fa(Df_ForFA_new, nfactors = fa_Nfactors_new,rotate = "oblimin", fm="ml") # run
+fa_loadings_new <- fa_results_new$loadings # extract factor loadings
+Df_loadings_new <- data.frame(PolOrientLoad <- fa_loadings_new[,1], DogmaLoad <- fa_loadings_new[,2], PBSLoad <- fa_loadings_new[,3]) # and save this into a dataframe
+```
+
+We next plot the factor analysis:
+
+```{r}
+# For plotting we add the questionnaire names as a variable into the dataframe
+Df_loadings_new$Question <- factor(rownames(Df_loadings_new), levels = rownames(Df_loadings_new))
+
+# We plot the first factor: Political Orientation
+pl_FAPolOrient <- ggplot(Df_loadings_new, aes(x = Question, y = PolOrientLoad, fill=Questionnaires)) + 
+  geom_bar(stat = "identity") + 
+  scale_fill_manual(guide = FALSE, values=FA_color, name="Questionnaires", breaks=c("Self report", "Voting", "SECS", "RWA", "LWA", "Political Issues", "Belief Superiority", "Dog"),labels=c("Political Orientation", "Voting", "SECS", "RWA", "LWA", "Political Issues", "Belief Superiority", "Dogmatism"))+
+  labs(y = "Loadings") +  theme_classic(base_size = 26) +
+  theme(axis.ticks = element_blank() ,axis.text.x = element_blank(),axis.line = element_blank(),legend.title=element_blank(), axis.title.x = element_blank()) +
+  expand_limits(y=c(-.9,.9)) +
+  scale_x_discrete(labels = FALSE) 
+pl_FAPolOrient
+
+# We plot the second factor: Dogmatism
+pl_FADogmatism <- ggplot(Df_loadings_new, aes(x = Question, y = DogmaLoad, fill=Questionnaires)) +
+  geom_bar(stat = "identity") + 
+  scale_fill_manual(guide = FALSE, values = FA_color, name="Questionnaires", breaks=c("Self report", "Voting", "SECS", "RWA", "LWA", "Political Issues", "Belief Superiority", "Dog"),labels=c("Political Orientation", "Voting", "SECS", "RWA", "LWA", "Political Issues", "Belief Superiority", "Dogmatism"))+
+  labs(y = "Loadings") +  theme_classic(base_size = 26) +
+  theme(axis.ticks = element_blank() ,axis.text.x = element_blank(),axis.line = element_blank(),legend.title=element_blank(), axis.title.x = element_blank()) +
+  expand_limits(y=c(-.9,.9))
+pl_FADogmatism
+
+pl_FAPBS <- ggplot(Df_loadings_new, aes(x = Question, y = PBSLoad, fill=Questionnaires)) +
+  geom_bar(stat = "identity") + 
+  scale_fill_manual(guide = FALSE, values= FA_color, name="Questionnaires", breaks=c("Self report", "Voting", "SECS", "RWA", "LWA", "Political Issues", "Belief Superiority", "Dog"),labels=c("Political Orientation", "Voting", "SECS", "RWA", "LWA", "Political Issues", "Belief Superiority", "Dogmatism"))+
+  labs(y = "Loadings") +  theme_classic(base_size = 26) +
+  theme(axis.ticks = element_blank() ,axis.text.x = element_blank(),axis.line = element_blank(),legend.title=element_blank(), axis.title.x = element_blank()) +
+  expand_limits(y=c(-.9,.9)) 
+pl_FAPBS
+```
+
+
+### Age effect
+
+We next have a closer look at the age-effect in study 2. First, we conduct a Kolmogorov-Smirnov Test to investigate whether these distributions differ.
+
+```{r}
+ks.test(Df_S1IndividualDiff$Age, Df_S2IndividualDiff$Age)
+```
+
+We check whether there's a relationship between age and information seeking:
+
+```{r}
+summary(lm(Age ~ AvSeek, data = Df_S1IndScaled))
+summary(lm(Age ~ AvSeek, data = Df_S2IndScaled))
+```
+
+We add additional checks for the age effect:
+
+```{r}
+RegressionPredictorsAgeCheck <- c("Gender", "Education", "Age", "AvPerf1st", "DotDiff", "AvConf", "AccStronger","AvSeek:Age","AvSeek")
+fDogmatismAgeCheck <- makeFormulaForLm("Dogmatism", RegressionPredictorsAgeCheck)
+```
+
+We run the regression, first for sample 1:
+
+```{r}
+m_S1_DogmatismAge <- lm(fDogmatismAgeCheck, data = Df_S1IndScaled)
+summary(m_S1_DogmatismAge)
+r2fromlm(Df_S1IndScaled, "Dogmatism", RegressionPredictorsAgeCheck, "AvSeek")
+```
+
+And then for sample 2:
+
+```{r}
+m_S2_DogmatismAge <- lm(fDogmatismAgeCheck, data = Df_S2IndScaled)
+summary(m_S2_DogmatismAge)
+r2fromlm(Df_S2IndScaled, "Dogmatism", RegressionPredictorsAgeCheck, "AvSeek")
+```
+
+
+
+
